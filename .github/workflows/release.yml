@@ -1,0 +1,59 @@
+# 打 tag（v*）时自动构建 C# 与 Rust 两套 Windows exe，并创建 GitHub Release 附件
+# 产物：
+#   FileRenamer-v<版本>-csharp-win-x64.exe  （C# WinForms 单文件自包含发布）
+#   FileRenamer-v<版本>-rust-win-x64.exe    （Rust + Win32，release 体积优先）
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 11.0.x
+
+      - name: Setup Rust stable
+        run: |
+          rustup update stable
+          rustup default stable
+
+      # C# WinForms：单文件自包含发布（csproj 内已配置 PublishSingleFile/SelfContained/EnableCompressionInSingleFile）
+      - name: Publish C# (single-file, self-contained)
+        run: dotnet publish windows/FileRenamer -c Release
+
+      # Rust + Win32：release 构建（Cargo.toml 内已配置 LTO + strip）
+      - name: Build Rust (release)
+        run: cargo build --release --manifest-path windows/FileRenamerRust/Cargo.toml
+
+      - name: Collect artifacts
+        shell: pwsh
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          New-Item -ItemType Directory -Path artifacts -Force | Out-Null
+          Copy-Item "windows/FileRenamer/bin/Release/net11.0-windows/win-x64/publish/FileRenamer.exe" "artifacts/FileRenamer-$env:VERSION-csharp-win-x64.exe"
+          Copy-Item "windows/FileRenamerRust/target/release/FileRenamerRust.exe" "artifacts/FileRenamer-$env:VERSION-rust-win-x64.exe"
+          Get-ChildItem artifacts
+
+      # 创建 Release 并上传两个 exe（用官方 gh CLI，不引入第三方 action）
+      - name: Create GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          gh release create "$env:VERSION" artifacts/*.exe `
+            --title "$env:VERSION" `
+            --notes "FileRenamer Windows 版：C#（单文件自包含）与 Rust（Win32）两套实现。"
