@@ -1,0 +1,51 @@
+# ============================================================
+# 根 .gitignore —— 全平台通用规则
+# 平台专属规则放在各平台目录下的 .gitignore 中
+# （windows/.gitignore、mac/.gitignore、linux/.gitignore）
+# ============================================================
+
+# ---------- macOS ----------
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+
+# ---------- Windows（系统级，与开发工具无关的）----------
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# ---------- Linux ----------
+*~
+.nfs*
+
+# ---------- 通用编辑器 / IDE ----------
+.idea/
+*.swp
+*.swo
+.vscode/
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# ---------- AI 助手工作区数据（不提交，内容通过 doc/ 文档交接）----------
+.workbuddy/
+
+# ---------- 备份 / 临时文件 ----------
+*.bak
+*.tmp
+*.log
+*.orig
+
+# ============================================================
+# mono-trim 注意事项：
+# .mono-trim/ 与 mono-trim.toml 是随仓库同步的项目配置，
+# 本文件未包含任何会误伤它们的通配规则，故无需加例外。
+# 若将来添加了宽泛的忽略模式，需补充：
+#   !.mono-trim/
+#   !mono-trim.toml
+# ============================================================

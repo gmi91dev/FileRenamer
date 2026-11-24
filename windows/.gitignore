@@ -1,0 +1,42 @@
+# ============================================================
+# windows/.gitignore —— Windows 平台专属规则
+# 覆盖：.NET (C#/WinForms) 与 Rust 两类子项目
+# ============================================================
+
+# ---------- Visual Studio ----------
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.rsuser
+
+# ---------- .NET 构建产物 ----------
+[Bb]in/
+[Oo]bj/
+[Oo]ut/
+publish/
+*.userprefs
+project.lock.json
+project.fragment.lock.json
+artifacts/
+
+# .NET 发布输出（单文件/自包含发布目录）
+[Pp]ublish*/
+*.publish.xml
+*.pubxml
+
+# ---------- Rider / ReSharper ----------
+*.sln.iml
+_ReSharper*/
+*.[Rr]e[Ss]harper
+
+# ---------- Rust ----------
+target/
+**/*.rs.bk
+
+# ---------- Windows 原生开发杂项 ----------
+*.pdb
+*.mdf
+*.ldf
+*.cachefile
