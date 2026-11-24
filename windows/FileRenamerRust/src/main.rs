@@ -3,12 +3,13 @@
 mod logic;
 mod vars;
 
-use std::sync::atomic::{AtomicI32, AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicU32, Ordering};
 
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    CLEARTYPE_QUALITY, COLOR_WINDOW, CreateFontIndirectW, HBRUSH, HFONT, HDC, NULL_BRUSH,
-    TRANSPARENT, GetStockObject, SetBkMode, GetMonitorInfoW, MonitorFromWindow,
+    CLEARTYPE_QUALITY, COLOR_WINDOW, CreateFontIndirectW, CreatePen, DeleteObject, HBRUSH, HFONT,
+    HDC, NULL_BRUSH, PS_SOLID, TRANSPARENT, Arc, BeginPaint, EndPaint, GetStockObject, InvalidateRect,
+    SelectObject, SetBkMode, PAINTSTRUCT, GetMonitorInfoW, MonitorFromWindow,
     MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
 use windows::Win32::System::Com::CoTaskMemFree;
@@ -17,6 +18,8 @@ use windows::Win32::UI::Shell::{
     SHBrowseForFolderW, SHGetPathFromIDListW,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+// 依据 windows crate 源码：EnableWindow 归属 KeyboardAndMouse 模块（对应 winuser.h 实现）
+use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows::Win32::UI::Controls::InitCommonControls;
 use windows::Win32::UI::Controls::Dialogs::{
     GetOpenFileNameW, OPENFILENAMEW, OFN_EXPLORER, OFN_FILEMUSTEXIST,
@@ -26,12 +29,14 @@ use windows::Win32::UI::HiDpi::GetDpiForSystem;
 use windows::Win32::UI::WindowsAndMessaging::{
     BM_GETCHECK, BN_CLICKED, BS_AUTOCHECKBOX, BS_GROUPBOX, BS_PUSHBUTTON,
     CreateWindowExW, DefWindowProcW, DispatchMessageW, ES_AUTOHSCROLL, ES_READONLY,
-    GetMessageW, GetWindowTextLengthW, GetWindowTextW, MessageBoxW,
-    PostQuitMessage, RegisterClassW, SendMessageW, SetWindowPos, SetWindowTextW, GetWindowRect,
-    SystemParametersInfoW, TranslateMessage, WM_COMMAND, WM_CTLCOLORSTATIC, WM_DESTROY, WM_SETFONT,
+    GetMessageW, GetClientRect, GetWindowTextLengthW, GetWindowTextW, MessageBoxW,
+    HTCLIENT, HWND_TOP, IDC_WAIT, KillTimer, PostMessageW, PostQuitMessage, RegisterClassW,
+    SendMessageW, SetCursor, SetTimer, SetWindowPos, SetWindowTextW, GetWindowRect,
+    SystemParametersInfoW, TranslateMessage, WM_APP, WM_COMMAND, WM_CTLCOLORSTATIC, WM_SETCURSOR,
+    WM_TIMER, WM_SETFONT, WM_DESTROY,
     WS_BORDER, WS_CHILD, WS_OVERLAPPEDWINDOW, WS_VISIBLE, WNDCLASSW, MB_ICONERROR, MB_ICONINFORMATION,
     MB_ICONWARNING, MB_OK, CW_USEDEFAULT, HMENU, IDC_ARROW, LoadCursorW, ShowWindow,
-    SW_SHOW, WINDOW_STYLE, SPI_GETNONCLIENTMETRICS, NONCLIENTMETRICSW,
+    SW_HIDE, SW_SHOW, SWP_SHOWWINDOW, WINDOW_STYLE, SPI_GETNONCLIENTMETRICS, NONCLIENTMETRICSW,
     SWP_NOSIZE, SWP_NOZORDER,
 };
 
@@ -50,8 +55,35 @@ static H_IMAGE: AtomicIsize = AtomicIsize::new(0);
 static H_DOC: AtomicIsize = AtomicIsize::new(0);
 static H_MAIN: AtomicIsize = AtomicIsize::new(0);
 static H_FONT: AtomicIsize = AtomicIsize::new(0);
+// 忙碌期间要禁用的四个操作按钮：浏览×2、生成清单、重命名
+static H_BTN_BROWSE: AtomicIsize = AtomicIsize::new(0);
+static H_BTN_BROWSE_LIST: AtomicIsize = AtomicIsize::new(0);
+static H_BTN_GENERATE: AtomicIsize = AtomicIsize::new(0);
+static H_BTN_RENAME: AtomicIsize = AtomicIsize::new(0);
+// 旋转加载指示器（菊花）子窗口
+static H_SPIN: AtomicIsize = AtomicIsize::new(0);
+// 是否有后台任务执行中（用于禁用按钮与 WM_SETCURSOR 等待光标）
+static BUSY: AtomicBool = AtomicBool::new(false);
+// 菊花当前角度（度），WM_TIMER 递增
+static SPIN_ANGLE: AtomicU32 = AtomicU32::new(0);
 // DPI 缩放百分比（100 = 96dpi），PerMonitorV2 下坐标按此缩放
 static SCALE_PCT: AtomicI32 = AtomicI32::new(100);
+
+// 自定义消息：后台线程完成后 PostMessageW 回 UI 线程（WM_APP 段供应用自定义）
+const WM_WORKDONE: u32 = WM_APP + 1;
+// 菊花动画参数：每 40ms 转 24°，约 600ms 一圈
+const SPIN_TIMER_ID: usize = 1;
+const SPIN_INTERVAL_MS: u32 = 40;
+const SPIN_STEP_DEG: u32 = 24;
+const SPIN_SIZE: i32 = 36; // 96dpi 基准边长
+
+/// 后台任务结果：worker 线程 Box::into_raw 后经 WM_WORKDONE 的 lParam 传回 UI 线程。
+/// 错误统一转成 String（io::Error 跨线程显示用）。
+enum WorkResult {
+    /// (生成结果：Ok(文件数)，清单完整路径文本)
+    Generate(Result<usize, String>, String),
+    Rename(Result<logic::RenameResult, String>),
+}
 
 const IDC_TXT_FOLDER: i32 = 1001;
 const IDC_BTN_BROWSE: i32 = 1002;
@@ -135,6 +167,18 @@ fn main() {
         };
         RegisterClassW(&wc);
 
+        // 菊花子窗口类：与主窗口同底色，WM_PAINT 自绘旋转圆弧
+        let spin_class = w!("FileRenamerSpinner");
+        let swc = WNDCLASSW {
+            lpfnWndProc: Some(spinner_proc),
+            hInstance: instance.into(),
+            hCursor: LoadCursorW(None, IDC_ARROW).unwrap(),
+            hbrBackground: HBRUSH((COLOR_WINDOW.0 + 1) as *mut core::ffi::c_void),
+            lpszClassName: spin_class,
+            ..Default::default()
+        };
+        RegisterClassW(&swc);
+
         // PerMonitorV2 下坐标是物理像素，需按实际 DPI 缩放布局（基准 96dpi）。
         let dpi = GetDpiForSystem();
         let scale_pct = ((dpi as f32 / 96.0) * 100.0).round() as i32;
@@ -205,7 +249,8 @@ unsafe fn build_controls(parent: HWND) {
     make(w!("STATIC"), w!("文件夹："), label, 26, 36, 60, 18, parent, 0);
     let h = make(w!("EDIT"), w!(""), WINDOW_STYLE(edit.0 | ES_READONLY as u32), 90, 32, 282, 22, parent, IDC_TXT_FOLDER);
     H_FOLDER.store(h.0 as isize, Ordering::SeqCst);
-    make(w!("BUTTON"), w!("浏览…"), button, 380, 30, 78, 26, parent, IDC_BTN_BROWSE);
+    let h = make(w!("BUTTON"), w!("浏览…"), button, 380, 30, 78, 26, parent, IDC_BTN_BROWSE);
+    H_BTN_BROWSE.store(h.0 as isize, Ordering::SeqCst);
     make(w!("STATIC"), w!("文件类型（都不选 = 全部）："), label, 26, 66, 210, 18, parent, 0);
     let h = make(w!("BUTTON"), w!("视频"), checkbox, 28, 92, 60, 20, parent, IDC_CHK_VIDEO);
     H_VIDEO.store(h.0 as isize, Ordering::SeqCst);
@@ -213,7 +258,8 @@ unsafe fn build_controls(parent: HWND) {
     H_IMAGE.store(h.0 as isize, Ordering::SeqCst);
     let h = make(w!("BUTTON"), w!("文档"), checkbox, 164, 92, 60, 20, parent, IDC_CHK_DOC);
     H_DOC.store(h.0 as isize, Ordering::SeqCst);
-    make(w!("BUTTON"), w!("生成清单表格"), button, 330, 88, 126, 28, parent, IDC_BTN_GENERATE);
+    let h = make(w!("BUTTON"), w!("生成清单表格"), button, 330, 88, 126, 28, parent, IDC_BTN_GENERATE);
+    H_BTN_GENERATE.store(h.0 as isize, Ordering::SeqCst);
     make(w!("STATIC"), w!("生成位置：所选文件夹内的 重命名清单.xlsx"), label, 26, 124, 320, 18, parent, 0);
 
     // 功能二与功能一完全独立：清单文件手动选择，处理范围 = 清单所在文件夹
@@ -221,13 +267,28 @@ unsafe fn build_controls(parent: HWND) {
     make(w!("STATIC"), w!("清单文件："), label, 26, 196, 80, 18, parent, 0);
     let h = make(w!("EDIT"), w!(""), WINDOW_STYLE(edit.0 | ES_READONLY as u32), 106, 192, 266, 22, parent, IDC_TXT_LIST);
     H_LIST.store(h.0 as isize, Ordering::SeqCst);
-    make(w!("BUTTON"), w!("浏览…"), button, 380, 190, 78, 26, parent, IDC_BTN_BROWSE_LIST);
+    let h = make(w!("BUTTON"), w!("浏览…"), button, 380, 190, 78, 26, parent, IDC_BTN_BROWSE_LIST);
+    H_BTN_BROWSE_LIST.store(h.0 as isize, Ordering::SeqCst);
     make(w!("STATIC"), w!("名称格式："), label, 26, 228, 90, 18, parent, 0);
     let h = make(w!("EDIT"), w!("{new}.{ext}"), edit, 116, 224, 200, 22, parent, IDC_TXT_PREFIX);
     H_PREFIX.store(h.0 as isize, Ordering::SeqCst);
-    make(w!("BUTTON"), w!("读取清单并重命名"), button, 330, 222, 126, 28, parent, IDC_BTN_RENAME);
+    let h = make(w!("BUTTON"), w!("读取清单并重命名"), button, 330, 222, 126, 28, parent, IDC_BTN_RENAME);
+    H_BTN_RENAME.store(h.0 as isize, Ordering::SeqCst);
     make(w!("STATIC"), w!("表头即变量（详见右侧按钮）"), label, 26, 262, 220, 18, parent, 0);
     make(w!("BUTTON"), w!("查看变量说明"), button, 330, 256, 126, 28, parent, IDC_BTN_VARS);
+
+    // 菊花子窗口：默认隐藏，忙碌时居中显示在主窗口上层
+    let spin = CreateWindowExW(
+        Default::default(),
+        w!("FileRenamerSpinner"),
+        w!(""),
+        WINDOW_STYLE(WS_CHILD.0),
+        sc(12), sc(12), sc(SPIN_SIZE), sc(SPIN_SIZE),
+        Some(parent),
+        None,
+        None, None,
+    ).expect("create spinner");
+    H_SPIN.store(spin.0 as isize, Ordering::SeqCst);
 }
 
 // 把 96dpi 基准坐标换算为当前 DPI 下的物理像素
@@ -253,6 +314,102 @@ unsafe fn apply_font(hwnd: HWND) {
     let h = H_FONT.load(Ordering::SeqCst);
     if h != 0 {
         let _ = SendMessageW(hwnd, WM_SETFONT, Some(WPARAM(h as usize)), Some(LPARAM(1)));
+    }
+}
+
+/// 菊花子窗口过程：WM_TIMER 推进角度并重绘，WM_PAINT 用 GDI Arc 画 3/4 圆弧。
+/// 依据：微软文档 Arc(hdc, x1,y1,x2,y2, x3,y3,x4,y4) —— 边界矩形 + 弧起点/终点射线，
+/// 起止点取圆周上按当前角度计算的坐标。
+unsafe extern "system" fn spinner_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    match msg {
+        WM_TIMER => {
+            SPIN_ANGLE.fetch_add(SPIN_STEP_DEG, Ordering::SeqCst);
+            let _ = InvalidateRect(Some(hwnd), None, true);
+            LRESULT(0)
+        }
+        WM_PAINT => {
+            let mut ps = PAINTSTRUCT::default();
+            let hdc = BeginPaint(hwnd, &mut ps);
+            let mut rc = RECT::default();
+            let _ = GetClientRect(hwnd, &mut rc);
+            let cx = (rc.left + rc.right) as f32 / 2.0;
+            let cy = (rc.top + rc.bottom) as f32 / 2.0;
+            let r = ((rc.right - rc.left).min(rc.bottom - rc.top)) as f32 / 2.0 - 4.0;
+            let a0 = SPIN_ANGLE.load(Ordering::SeqCst) as f32;
+            let (sin0, cos0) = a0.to_radians().sin_cos();
+            let (sin1, cos1) = (a0 + 270.0).to_radians().sin_cos();
+            let pen = CreatePen(PS_SOLID, 3, COLORREF(0x00B49646)); // COLORREF 是 0x00BBGGRR → SteelBlue(70,130,180)
+            let old = SelectObject(hdc, pen.into());
+            Arc(hdc, rc.left, rc.top, rc.right, rc.bottom,
+                (cx + r * cos0) as i32, (cy + r * sin0) as i32,
+                (cx + r * cos1) as i32, (cy + r * sin1) as i32);
+            SelectObject(hdc, old);
+            let _ = DeleteObject(pen.into());
+            let _ = EndPaint(hwnd, &ps);
+            LRESULT(0)
+        }
+        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
+/// 进入/退出忙状态：禁用浏览/生成/重命名按钮，主窗口中央显示旋转菊花。
+/// 与 C# 版行为一致：后台执行耗时逻辑，UI 线程消息循环保持畅通，窗口不会无响应。
+unsafe fn set_busy(busy: bool) {
+    BUSY.store(busy, Ordering::SeqCst);
+    for atom in [&H_BTN_BROWSE, &H_BTN_GENERATE, &H_BTN_BROWSE_LIST, &H_BTN_RENAME] {
+        EnableWindow(hwnd_of(atom), !busy);
+    }
+    let spin = hwnd_of(&H_SPIN);
+    if busy {
+        let mut rc = RECT::default();
+        let _ = GetClientRect(hwnd_of(&H_MAIN), &mut rc);
+        let w = sc(SPIN_SIZE);
+        let h_ = sc(SPIN_SIZE);
+        let x = (rc.right - rc.left - w) / 2;
+        let y = (rc.bottom - rc.top - h_) / 2;
+        // HWND_TOP 置于子控件最上层，SWP_SHOWWINDOW 同时显示
+        SetWindowPos(spin, Some(HWND_TOP), x, y, w, h_, SWP_SHOWWINDOW);
+        SetTimer(Some(spin), SPIN_TIMER_ID, SPIN_INTERVAL_MS, None);
+    } else {
+        KillTimer(Some(spin), SPIN_TIMER_ID);
+        let _ = ShowWindow(spin, SW_HIDE);
+    }
+}
+
+/// 把耗时任务放到 std::thread 执行，完成后 PostMessageW 把 Box<WorkResult>
+/// 经 lParam 传回 UI 线程弹窗（Win32 跨线程回 UI 的标准做法）。
+fn spawn_work(f: impl FnOnce() -> WorkResult + Send + 'static) {
+    // HWND 含裸指针不实现 Send，传 isize 值、线程内再还原
+    let hwnd_val = hwnd_of(&H_MAIN).0 as isize;
+    std::thread::spawn(move || {
+        let result = f();
+        unsafe {
+            let _ = PostMessageW(
+                Some(HWND(hwnd_val as *mut core::ffi::c_void)),
+                WM_WORKDONE,
+                WPARAM(0),
+                LPARAM(Box::into_raw(Box::new(result)) as isize),
+            );
+        }
+    });
+}
+
+/// 展示重命名结果弹窗（与 C# 版文案一致）。
+fn show_rename_result(r: logic::RenameResult) {
+    let unknown_hint = if r.unknown.is_empty() { String::new() } else {
+        format!("\n\n未定义变量（已按空值处理）：{}", r.unknown.join("、"))
+    };
+    if !r.problems.is_empty() {
+        let mut s = format!("发现以下问题，未执行任何重命名：\n\n{}\n", r.problems[..r.problems.len().min(20)].join("\n"));
+        if r.problems.len() > 20 { s.push_str(&format!("\n……等共 {} 项", r.problems.len())); }
+        s.push_str(&unknown_hint);
+        msg_box(&s, "无法继续", MB_OK | MB_ICONWARNING);
+    } else if r.failures.is_empty() {
+        msg_box(&format!("重命名完成，共处理 {} 个文件。{}", r.done, unknown_hint),
+            "完成", MB_OK | MB_ICONINFORMATION);
+    } else {
+        msg_box(&format!("完成 {} 个，失败 {} 个：\n\n{}{}", r.done, r.failures.len(),
+            r.failures[..r.failures.len().min(20)].join("\n"), unknown_hint), "部分失败", MB_OK | MB_ICONWARNING);
     }
 }
 
@@ -287,6 +444,34 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 SetBkMode(hdc, TRANSPARENT);
                 LRESULT(GetStockObject(NULL_BRUSH).0 as isize)
             }
+        }
+        // 忙碌时客户区显示等待光标（与 C# 版 UseWaitCursor 行为一致）
+        WM_SETCURSOR => {
+            if BUSY.load(Ordering::SeqCst) && (lparam.0 as u32 & 0xffff) == HTCLIENT as u32 {
+                let c = LoadCursorW(None, IDC_WAIT).unwrap();
+                SetCursor(Some(c));
+                LRESULT(1)
+            } else {
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
+        }
+        // 后台任务完成：取回 Box<WorkResult>，退出忙状态并弹窗
+        WM_WORKDONE => {
+            let boxed = unsafe { Box::from_raw(lparam.0 as *mut WorkResult) };
+            unsafe { set_busy(false); }
+            match *boxed {
+                WorkResult::Generate(res, list_display) => match res {
+                    Ok(n) => msg_box(
+                        &format!("已生成清单：{}\n共 {} 个文件。\n填好第二列后，可在功能二中随时处理。", list_display, n),
+                        "完成", MB_OK | MB_ICONINFORMATION),
+                    Err(e) => msg_box(&format!("生成清单失败：\n{}", e), "错误", MB_OK | MB_ICONERROR),
+                },
+                WorkResult::Rename(res) => match res {
+                    Ok(r) => show_rename_result(r),
+                    Err(e) => msg_box(&format!("重命名失败：\n{}", e), "错误", MB_OK | MB_ICONERROR),
+                },
+            }
+            LRESULT(0)
         }
         WM_DESTROY => {
             PostQuitMessage(0);
@@ -378,14 +563,17 @@ unsafe fn on_generate() {
         image: unsafe { is_checked(hwnd_of(&H_IMAGE)) },
         doc: unsafe { is_checked(hwnd_of(&H_DOC)) },
     };
-    match logic::generate_list(std::path::Path::new(folder), &filter) {
-        Ok(names) => {
-            let list = std::path::Path::new(folder).join(logic::LIST_FILE_NAME);
-            msg_box(&format!("已生成清单：{}\n共 {} 个文件。\n填好第二列后，可在功能二中随时处理。", list.display(), names.len()),
-                    "完成", MB_OK | MB_ICONINFORMATION);
-        }
-        Err(e) => msg_box(&format!("生成清单失败：\n{}", e), "错误", MB_OK | MB_ICONERROR),
-    }
+    // 扫描文件夹 + 写 xlsx 可能耗时：后台线程执行，期间显示菊花、禁用操作按钮
+    unsafe { set_busy(true); }
+    let folder = folder.to_string();
+    spawn_work(move || {
+        let list = std::path::Path::new(&folder).join(logic::LIST_FILE_NAME);
+        let list_display = list.display().to_string();
+        let res = logic::generate_list(std::path::Path::new(&folder), &filter)
+            .map(|names| names.len())
+            .map_err(|e| e.to_string());
+        WorkResult::Generate(res, list_display)
+    });
 }
 
 unsafe fn on_rename() {
@@ -405,24 +593,11 @@ unsafe fn on_rename() {
         msg_box("请填写名称格式，例如 {new}.{ext}", "提示", MB_OK | MB_ICONINFORMATION);
         return;
     }
-    match logic::rename(list, &template) {
-        Ok(r) => {
-            let unknown_hint = if r.unknown.is_empty() { String::new() } else {
-                format!("\n\n未定义变量（已按空值处理）：{}", r.unknown.join("、"))
-            };
-            if !r.problems.is_empty() {
-                let mut s = format!("发现以下问题，未执行任何重命名：\n\n{}\n", r.problems[..r.problems.len().min(20)].join("\n"));
-                if r.problems.len() > 20 { s.push_str(&format!("\n……等共 {} 项", r.problems.len())); }
-                s.push_str(&unknown_hint);
-                msg_box(&s, "无法继续", MB_OK | MB_ICONWARNING);
-            } else if r.failures.is_empty() {
-                msg_box(&format!("重命名完成，共处理 {} 个文件。{}", r.done, unknown_hint),
-                    "完成", MB_OK | MB_ICONINFORMATION);
-            } else {
-                msg_box(&format!("完成 {} 个，失败 {} 个：\n\n{}{}", r.done, r.failures.len(),
-                    r.failures[..r.failures.len().min(20)].join("\n"), unknown_hint), "部分失败", MB_OK | MB_ICONWARNING);
-            }
-        }
-        Err(e) => msg_box(&format!("重命名失败：\n{}", e), "错误", MB_OK | MB_ICONERROR),
-    }
+    // 读取清单 + 哈希 + 改名可能耗时：后台线程执行，期间显示菊花、禁用操作按钮
+    unsafe { set_busy(true); }
+    let list = list.to_path_buf();
+    spawn_work(move || {
+        let res = logic::rename(&list, &template).map_err(|e| e.to_string());
+        WorkResult::Rename(res)
+    });
 }

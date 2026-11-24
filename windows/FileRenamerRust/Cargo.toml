@@ -24,6 +24,7 @@ features = [
     "Win32_Storage_FileSystem",
     "Win32_System_Time",
     "Win32_System_SystemInformation",
+    "Win32_UI_Input_KeyboardAndMouse",
 ]
 
 # 体积优先的 release 配置：LTO + 单代码生成单元 + 剥离符号 + panic 时直接终止

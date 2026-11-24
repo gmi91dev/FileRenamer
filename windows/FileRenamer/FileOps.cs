@@ -163,6 +163,8 @@ public static class FileOps
 
             // 模板不用 {new} 时（如 {no}_{old}.{ext}），new 列留空也应正常处理
             bool usesNew = template.Contains("{new}", StringComparison.Ordinal);
+            // {hash} 需要读全文件做 MD5，代价大：模板未用到时跳过，避免无谓的整文件读取
+            bool usesHash = template.Contains("{hash}", StringComparison.OrdinalIgnoreCase);
             string folderName = new DirectoryInfo(folder).Name;
             var now = DateTime.Now;
             var unknown = new HashSet<string>(StringComparer.Ordinal);
@@ -192,7 +194,8 @@ public static class FileOps
                 values["old"] = stem;
                 values["ext"] = ext;
                 values["folder"] = folderName;
-                values["hash"] = Convert.ToHexString(MD5.HashData(File.ReadAllBytes(source))).ToLowerInvariant();
+                if (usesHash)
+                    values["hash"] = Convert.ToHexString(MD5.HashData(File.ReadAllBytes(source))).ToLowerInvariant(); // 仅模板用到时才读文件计算
                 try
                 {
                     var info = new FileInfo(source);

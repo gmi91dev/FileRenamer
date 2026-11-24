@@ -2,9 +2,34 @@ namespace FileRenamer;
 
 public partial class Form1 : Form
 {
+    // 旋转加载指示器：耗时操作期间显示，构造后加入窗体（隐藏时不参与 AutoSize 布局）
+    private readonly Spinner spinner = new();
+
     public Form1()
     {
         InitializeComponent();
+        spinner.Visible = false;
+        Controls.Add(spinner);
+    }
+
+    /// <summary>
+    /// 进入/退出忙状态：显示旋转菊花，禁用浏览/生成/重命名等操作按钮。
+    /// 耗时逻辑在后台线程执行（Task.Run），UI 线程保持消息循环，窗口不会无响应。
+    /// </summary>
+    private void SetBusy(bool busy)
+    {
+        UseWaitCursor = busy;
+        btnBrowse.Enabled = btnBrowseList.Enabled = btnGenerate.Enabled = btnRename.Enabled = !busy;
+        if (busy)
+        {
+            spinner.Location = new Point((ClientSize.Width - spinner.Width) / 2, (ClientSize.Height - spinner.Height) / 2);
+            spinner.BringToFront();
+            spinner.Visible = true;
+        }
+        else
+        {
+            spinner.Visible = false;
+        }
     }
 
     private void btnBrowse_Click(object? sender, EventArgs e)
@@ -38,7 +63,7 @@ public partial class Form1 : Form
             txtListFile.Text = dialog.FileName;
     }
 
-    private void btnGenerate_Click(object? sender, EventArgs e)
+    private async void btnGenerate_Click(object? sender, EventArgs e)
     {
         string folder = txtFolder.Text.Trim();
         if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder))
@@ -47,9 +72,11 @@ public partial class Form1 : Form
             return;
         }
 
+        SetBusy(true);
         try
         {
-            var names = FileOps.GenerateList(folder, chkVideo.Checked, chkImage.Checked, chkDoc.Checked);
+            // 扫描文件夹 + 写 xlsx 可能耗时，放后台线程，避免阻塞 UI 消息循环
+            var names = await Task.Run(() => FileOps.GenerateList(folder, chkVideo.Checked, chkImage.Checked, chkDoc.Checked));
             string listPath = Path.Combine(folder, FileOps.ListFileName);
             MessageBox.Show(this,
                 $"已生成清单：{listPath}\n共 {names.Count} 个文件。\n填好第二列后，可在功能二中随时处理。",
@@ -59,9 +86,13 @@ public partial class Form1 : Form
         {
             MessageBox.Show(this, "生成清单失败：\n" + ex.Message, "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
+        finally
+        {
+            SetBusy(false);
+        }
     }
 
-    private void btnRename_Click(object? sender, EventArgs e)
+    private async void btnRename_Click(object? sender, EventArgs e)
     {
         string listPath = txtListFile.Text.Trim();
         if (string.IsNullOrWhiteSpace(listPath) || !File.Exists(listPath))
@@ -77,9 +108,11 @@ public partial class Form1 : Form
             return;
         }
 
+        SetBusy(true);
         try
         {
-            var result = FileOps.Rename(listPath, template);
+            // 读取清单 + MD5 哈希全部文件可能耗时，放后台线程，避免阻塞 UI 消息循环
+            var result = await Task.Run(() => FileOps.Rename(listPath, template));
             string unknownHint = result.Unknown.Count == 0
                 ? ""
                 : "\n\n未定义变量（已按空值处理）：" + string.Join("、", result.Unknown);
@@ -104,6 +137,10 @@ public partial class Form1 : Form
         catch (Exception ex)
         {
             MessageBox.Show(this, "重命名失败：\n" + ex.Message, "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        finally
+        {
+            SetBusy(false);
         }
     }
 

@@ -152,6 +152,8 @@ pub fn rename(list_path: &Path, template: &str) -> Result<RenameResult, Box<dyn 
 
     // 模板不用 {new} 时（如 {no}_{old}.{ext}），new 列留空也应正常处理
     let template_uses_new = template.contains("{new}");
+    // {hash} 需要读全文件做 MD5，代价大：模板未用到时跳过，避免无谓的整文件读取
+    let template_uses_hash = template.contains("{hash}");
     let today = unsafe { vars::today() };
     let folder_name = folder.file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -187,7 +189,9 @@ pub fn rename(list_path: &Path, template: &str) -> Result<RenameResult, Box<dyn 
         values.insert("old".into(), stem);          // 旧名主名，不含后缀
         values.insert("ext".into(), ext);           // 小写后缀，不含点
         values.insert("folder".into(), folder_name.clone());
-        values.insert("hash".into(), vars::file_md5(&source)); // 完整 MD5，小写 32 位
+        if template_uses_hash {
+            values.insert("hash".into(), vars::file_md5(&source)); // 完整 MD5，小写 32 位（仅模板用到时才读文件计算）
+        }
         if let Ok(md) = fs::metadata(&source) {
             values.insert("size".into(), vars::human_size(md.len()));
         }
