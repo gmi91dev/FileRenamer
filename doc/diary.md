@@ -17,3 +17,5 @@
 - 性能优化：名称格式模板未使用 {hash} 时跳过 MD5 全文件读取（此前每个文件都强制计算，大文件场景代价高）。
 - 发布流程增强：Release 创建改用 `gh release create --generate-notes`，每次发布自动生成基于提交记录的发布内容。发布 v0.1.1。
 - 修复 v0.1.1 Rust 版启动即静默退出（退出码 0xC0000409）：`spinner_proc` 的 match 里 `WM_PAINT =>` 分支因常量未导入，被 Rust 解析为变量绑定模式（catch-all），吞掉全部消息并使 `WM_NCCREATE` 返回 FALSE，系统随即销毁窗口导致 `CreateWindowExW` 返回 NULL、`expect` panic。补导入 `WM_PAINT` 即修复。教训：match arm 裸标识符必须确认常量已导入（编译器只报 unused-variable warning），warning 不可忽略。
+- 修复 NAS/SMB 共享目录下的批量重命名失败（"unable to find the specified file"）：两阶段改名的中转临时名原以 `._` 开头，Samba 系 NAS 会拒绝该前缀的文件名（AppleDouble 双文件前缀），服务端直接返回"文件不存在"。中转名改用 `__rn_` 前缀，且失败时回滚还原，不留半成品。
+- 清单新增 `author` 内置字段（`new` 列右侧固定一列，值由用户填写，可用 `{author}` 参与模板）；窗口标题改为 `FileRenamer v<版本号>`；发布流程改为以 git tag 为唯一版本来源并注入构建，保证标题显示、Release 标签、产物文件名三者一致。

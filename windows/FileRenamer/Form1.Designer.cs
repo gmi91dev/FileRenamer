@@ -259,7 +259,7 @@ partial class Form1
         MaximizeBox = false;
         Name = "Form1";
         StartPosition = FormStartPosition.CenterScreen;
-        Text = "批量重命名工具";
+        Text = "FileRenamer";
         grpStep1.ResumeLayout(false);
         grpStep1.PerformLayout();
         grpStep2.ResumeLayout(false);

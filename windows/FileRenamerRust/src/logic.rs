@@ -98,6 +98,8 @@ pub fn generate_list(folder: &Path, filter: &TypeFilter) -> Result<Vec<String>, 
     worksheet.write_with_format(0, 0, "no", &bold_center)?;
     worksheet.write_with_format(0, 1, "old", &bold_center)?;
     worksheet.write_with_format(0, 2, "new", &bold_center)?;
+    // author 是保留列名（内置字段）：值由用户在表里填写，模板可用 {author} 引用
+    worksheet.write_with_format(0, 3, "author", &bold_center)?;
     for (i, name) in names.iter().enumerate() {
         // no 列用公式生成序号：用户删掉任意一行后，Excel/WPS 重算公式，序号自动连续不断档。
         // ROW() 返回当前行号，减去表头占用的 1 行即为从 1 开始的序号。
@@ -108,8 +110,10 @@ pub fn generate_list(folder: &Path, filter: &TypeFilter) -> Result<Vec<String>, 
     worksheet.set_column_width(0, 6)?;
     worksheet.set_column_width(1, 44)?;
     worksheet.set_column_width(2, 32)?;
+    worksheet.set_column_width(3, 20)?;
     worksheet.set_column_format(1, &wrap)?;
     worksheet.set_column_format(2, &wrap)?;
+    worksheet.set_column_format(3, &wrap)?;
     workbook.save(folder.join(LIST_FILE_NAME))?;
     Ok(names)
 }
@@ -149,6 +153,9 @@ pub fn rename(list_path: &Path, template: &str) -> Result<RenameResult, Box<dyn 
         .ok_or("清单缺少 old 列（旧文件名列的表头须为 old）")?;
     let new_col = headers.iter().position(|h| h == "new")
         .ok_or("清单缺少 new 列（新名称列的表头须为 new）")?;
+    // author 是保留列名（内置字段）：值取自表格 author 列，由用户填写；
+    // 清单里没有这一列时也注册为空串，模板写 {author} 不会算未定义变量。
+    let author_col = headers.iter().position(|h| h.eq_ignore_ascii_case("author"));
 
     // 模板不用 {new} 时（如 {no}_{old}.{ext}），new 列留空也应正常处理
     let template_uses_new = template.contains("{new}");
@@ -189,6 +196,9 @@ pub fn rename(list_path: &Path, template: &str) -> Result<RenameResult, Box<dyn 
         values.insert("old".into(), stem);          // 旧名主名，不含后缀
         values.insert("ext".into(), ext);           // 小写后缀，不含点
         values.insert("folder".into(), folder_name.clone());
+        // author 是保留列名（内置字段）：取表格 author 列的值，由用户填写；
+        // 清单里没有 author 列时为空串，不算未定义变量。
+        values.insert("author".into(), author_col.map(|i| cell(i)).unwrap_or_default());
         if template_uses_hash {
             values.insert("hash".into(), vars::file_md5(&source)); // 完整 MD5，小写 32 位（仅模板用到时才读文件计算）
         }
@@ -248,17 +258,31 @@ pub fn rename(list_path: &Path, template: &str) -> Result<RenameResult, Box<dyn 
     if !result.problems.is_empty() { return Ok(result); }
 
     // 两阶段改名：先全部改临时名，再改目标名，规避链式冲突与仅大小写差异
+    // 临时名不能以 "._" 开头：部分 SMB/NAS 服务器（Samba 等）会拒绝以 "._" 开头的
+    // 文件名（macOS AppleDouble 双文件前缀），表现为 FileNotFoundException。
+    // 统一用 "__rn_" 前缀 + 纳秒时间戳 + 序号，本地磁盘与 SMB 上均可正常创建。
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     let mut staged: Vec<(PathBuf, Plan)> = Vec::new();
     for (i, p) in plans.into_iter().enumerate() {
-        let tmp = folder.join(format!(".__rn_{}_{}.tmp", nanos, i));
-        fs::rename(folder.join(&p.old), &tmp)?;
+        let tmp = folder.join(format!("__rn_{}_{}.tmp", nanos, i));
+        if let Err(e) = fs::rename(folder.join(&p.old), &tmp) {
+            // 阶段一失败：把已改到临时名的文件还原，避免留下半成品
+            for (done_tmp, done_plan) in &staged {
+                let _ = fs::rename(done_tmp, folder.join(&done_plan.old));
+            }
+            result.failures.push(format!("{} → {}：{}", p.old, p.new, e));
+            return Ok(result);
+        }
         staged.push((tmp, p));
     }
     for (tmp, p) in staged {
         match fs::rename(&tmp, folder.join(&p.new)) {
             Ok(()) => result.done += 1,
-            Err(e) => result.failures.push(format!("{} → {}：{}", p.old, p.new, e)),
+            Err(e) => {
+                // 阶段二失败：把临时名还原成原名，别把文件留在 __rn_*.tmp 上
+                let _ = fs::rename(&tmp, folder.join(&p.old));
+                result.failures.push(format!("{} → {}：{}", p.old, p.new, e));
+            }
         }
     }
     Ok(result)
@@ -499,5 +523,91 @@ mod tests {
         assert!(d.join("2-二.txt").is_file(), "空行不占号，次行应为 2");
         assert!(d.join("3-三.txt").is_file());
         let _ = fs::remove_dir_all(&d);
+    }
+
+    /// 临时名不得以 "._" 开头：部分 SMB/NAS（Samba 等）拒绝以 "._" 开头的文件名，
+    /// 表现为 FileNotFoundException。此测试锁定临时名前缀，防止回退到 ".__rn_"。
+    #[test]
+    fn temp_name_avoids_dot_underscore_prefix() {
+        let d = tmpdir();
+        fs::write(d.join("甲.TXT"), b"a").unwrap();
+        let list = d.join("清单.xlsx");
+        write_sheet(&list, &["no", "old", "new"], &[
+            vec!["1".into(), "甲.TXT".into(), "新名".into()],
+        ]);
+        let r = rename(&list, "{new}.{ext}").unwrap();
+        assert!(r.failures.is_empty(), "{:?}", r.failures);
+        assert_eq!(r.done, 1);
+        assert!(d.join("新名.txt").is_file());
+        // 目录里不应残留临时名
+        for n in names_in(&d) {
+            assert!(!n.starts_with("._"), "临时名不得以 ._ 开头：{}", n);
+            assert!(!n.starts_with("__rn_"), "不应残留临时名：{}", n);
+        }
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// author 是保留列名（内置字段）：生成清单时 new 右侧自带该列，值由用户填写；
+    /// {author} 取该列的值；清单没有该列时按空值处理，不算未定义变量。
+    #[test]
+    fn author_is_builtin_column() {
+        // 生成清单：author 列应紧跟在 new 右侧
+        let d = tmpdir();
+        fs::write(d.join("甲.TXT"), b"a").unwrap();
+        fs::write(d.join("乙.MP4"), b"b").unwrap();
+        generate_list(&d, &TypeFilter { video: false, image: false, doc: false }).unwrap();
+        let mut wb: Xlsx<_> = open_workbook(d.join(LIST_FILE_NAME)).unwrap();
+        let range = wb.worksheet_range("重命名清单").unwrap();
+        let first: Vec<String> = range.rows().next().unwrap().iter()
+            .map(|c| cell_text(Some(c))).collect();
+        assert_eq!(first, vec!["no", "old", "new", "author"], "author 应为第 4 列");
+        drop(wb);
+
+        // 填写 author 列后，{author} 取该列的值
+        let d2 = tmpdir();
+        fs::write(d2.join("甲.TXT"), b"a").unwrap();
+        let list2 = d2.join(LIST_FILE_NAME);
+        write_sheet(&list2, &["no", "old", "new", "author"], &[
+            vec!["1".into(), "甲.TXT".into(), "标题".into(), "张三".into()],
+        ]);
+        let r = rename(&list2, "{author}-{new}.{ext}").unwrap();
+        assert!(r.problems.is_empty() && r.failures.is_empty(), "{:?} {:?}", r.problems, r.failures);
+        assert!(r.unknown.is_empty(), "author 是内置变量，不应报未定义：{:?}", r.unknown);
+        assert!(d2.join("张三-标题.txt").is_file(), "{:?}", names_in(&d2));
+        let _ = fs::remove_dir_all(&d2);
+
+        // 清单没有 author 列时：{author} 按空值处理，不报未定义变量
+        let d3 = tmpdir();
+        fs::write(d3.join("甲.TXT"), b"a").unwrap();
+        let list3 = d3.join(LIST_FILE_NAME);
+        write_sheet(&list3, &["no", "old", "new"], &[
+            vec!["1".into(), "甲.TXT".into(), "标题".into()],
+        ]);
+        let r = rename(&list3, "{author}{new}.{ext}").unwrap();
+        assert!(r.problems.is_empty() && r.failures.is_empty(), "{:?} {:?}", r.problems, r.failures);
+        assert!(r.unknown.is_empty(), "author 缺列也应视为已知变量：{:?}", r.unknown);
+        assert!(d3.join("标题.txt").is_file(), "{:?}", names_in(&d3));
+        let _ = fs::remove_dir_all(&d3);
+
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// SMB 端到端验证（可选，通过环境变量 SMB_VERIFY_DIR 触发）：
+    /// 在指定目录下跑一遍 rename，断言全部成功且无临时名残留。
+    /// 模板可用 SMB_VERIFY_TEMPLATE 覆盖（默认 {new}.{ext}）。
+    /// 用法：SMB_VERIFY_DIR="//host/share/dir" cargo test smb_verify -- --ignored
+    #[test]
+    #[ignore]
+    fn smb_verify() {
+        let dir = PathBuf::from(std::env::var("SMB_VERIFY_DIR").expect("需要 SMB_VERIFY_DIR 环境变量"));
+        let template = std::env::var("SMB_VERIFY_TEMPLATE").unwrap_or_else(|_| "{new}.{ext}".to_string());
+        let list = dir.join(LIST_FILE_NAME);
+        let r = rename(&list, &template).expect("rename 失败");
+        assert!(r.problems.is_empty(), "problems: {:?}", r.problems);
+        assert!(r.failures.is_empty(), "failures: {:?}", r.failures);
+        for n in names_in(&dir) {
+            assert!(!n.starts_with("._"), "残留以 ._ 开头的名: {}", n);
+            assert!(!n.starts_with("__rn_"), "残留临时名: {}", n);
+        }
     }
 }

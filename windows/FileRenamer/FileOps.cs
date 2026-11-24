@@ -51,14 +51,16 @@ public static class FileOps
         names.Sort(static (a, b) => StrCmpLogicalW(a, b));
 
         string listPath = Path.Combine(folder, ListFileName);
-        // 表头即变量名：no=序号，old=完整旧文件名（含后缀，程序据此定位文件），new=新名称
+        // 表头即变量名：no=序号，old=完整旧文件名（含后缀，程序据此定位文件），new=新名称，
+        // author=作者（保留列名，值由用户在表里填写，模板可用 {author} 引用）
         using var workbook = new XLWorkbook();
         var ws = workbook.AddWorksheet("重命名清单");
         ws.Cell(1, 1).Value = "no";
         ws.Cell(1, 2).Value = "old";
         ws.Cell(1, 3).Value = "new";
+        ws.Cell(1, 4).Value = "author";
         // 标题行：加粗 + 水平居中（ClosedXML 官方 wiki: Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Center）
-        for (int c = 1; c <= 3; c++)
+        for (int c = 1; c <= 4; c++)
         {
             ws.Cell(1, c).Style.Font.Bold = true;
             ws.Cell(1, c).Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Center;
@@ -75,15 +77,17 @@ public static class FileOps
         }
 
         // 所有内容（表头 + 数据行）垂直居中（ClosedXML IXLAlignment.Vertical）
-        ws.Range(1, 1, names.Count + 1, 3).Style.Alignment.Vertical = XLAlignmentVerticalValues.Center;
+        ws.Range(1, 1, names.Count + 1, 4).Style.Alignment.Vertical = XLAlignmentVerticalValues.Center;
 
-        // old/new 列开启自动换行：长文件名不会被相邻列遮挡（IXLAlignment.WrapText）
+        // old/new/author 列开启自动换行：长文本不会被相邻列遮挡（IXLAlignment.WrapText）
         ws.Column(2).Style.Alignment.WrapText = true;
         ws.Column(3).Style.Alignment.WrapText = true;
+        ws.Column(4).Style.Alignment.WrapText = true;
 
         ws.Column(1).Width = 6;
         ws.Column(2).Width = 44;
         ws.Column(3).Width = 32;
+        ws.Column(4).Width = 20;
         workbook.SaveAs(listPath);
         return names;
     }
@@ -161,6 +165,10 @@ public static class FileOps
             if (oldCol < 0 || newCol < 0)
                 throw new InvalidDataException("清单缺少表头：需包含 old（完整旧文件名）和 new（新名称）两列。");
 
+            // author 是保留列名（内置字段）：值取自表格 author 列，由用户填写。
+            // 清单里没有这一列时也注册为空串，模板写 {author} 不会算"未定义变量"。
+            int authorCol = headers.FindIndex(h => string.Equals(h, "author", StringComparison.OrdinalIgnoreCase));
+
             // 模板不用 {new} 时（如 {no}_{old}.{ext}），new 列留空也应正常处理
             bool usesNew = template.Contains("{new}", StringComparison.Ordinal);
             // {hash} 需要读全文件做 MD5，代价大：模板未用到时跳过，避免无谓的整文件读取
@@ -194,6 +202,9 @@ public static class FileOps
                 values["old"] = stem;
                 values["ext"] = ext;
                 values["folder"] = folderName;
+                // author 是保留列名（内置字段）：取表格 author 列的值，由用户填写；
+                // 清单里没有 author 列时为空串，不算未定义变量。
+                values["author"] = Get(authorCol);
                 if (usesHash)
                     values["hash"] = Convert.ToHexString(MD5.HashData(File.ReadAllBytes(source))).ToLowerInvariant(); // 仅模板用到时才读文件计算
                 try
@@ -256,12 +267,28 @@ public static class FileOps
         if (!result.Valid) return result;
 
         // 两阶段改名：先全部改临时名，再改目标名，规避链式冲突与仅大小写差异
+        // 临时名不能以 "._" 开头：部分 SMB/NAS 服务器（Samba 等）会拒绝以 "._" 开头的
+        // 文件名（macOS AppleDouble 双文件前缀），表现为 FileNotFoundException。
+        // 统一用 "__rn_" 前缀 + GUID，本地磁盘与 SMB 上均可正常创建。
         var staged = new List<(string TempPath, RenamePlan Plan)>();
         foreach (var plan in plans)
         {
-            string tempPath = Path.Combine(folder, $".__rn_{Guid.NewGuid():N}.tmp");
-            File.Move(Path.Combine(folder, plan.OldName), tempPath);
-            staged.Add((tempPath, plan));
+            string tempPath = Path.Combine(folder, $"__rn_{Guid.NewGuid():N}.tmp");
+            try
+            {
+                File.Move(Path.Combine(folder, plan.OldName), tempPath);
+                staged.Add((tempPath, plan));
+            }
+            catch (Exception ex)
+            {
+                // 阶段一失败：把已改到临时名的文件还原，避免留下半成品
+                foreach (var (doneTemp, donePlan) in staged)
+                {
+                    try { File.Move(doneTemp, Path.Combine(folder, donePlan.OldName)); } catch { }
+                }
+                result.Failures.Add($"{plan.OldName} → {plan.NewName}：{ex.Message}");
+                return result;
+            }
         }
 
         foreach (var (tempPath, plan) in staged)
@@ -273,6 +300,8 @@ public static class FileOps
             }
             catch (Exception ex)
             {
+                // 阶段二失败：把临时名还原成原名，别把文件留在 __rn_*.tmp 上
+                try { File.Move(tempPath, Path.Combine(folder, plan.OldName)); } catch { }
                 result.Failures.Add($"{plan.OldName} → {plan.NewName}：{ex.Message}");
             }
         }

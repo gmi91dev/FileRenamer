@@ -97,14 +97,26 @@ const IDC_TXT_LIST: i32 = 1009;
 const IDC_BTN_BROWSE_LIST: i32 = 1010;
 const IDC_BTN_VARS: i32 = 1011;
 
+/// 产品版本号：编译期取自 Cargo.toml 的 package.version
+/// （cargo 官方文档 https://doc.rust-lang.org/cargo/reference/environment-variables.html）
+/// 与 C# 版共用同一版本号，两版窗口标题栏显示一致。
+const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// 窗口标题：与仓库/发布产物名一致（FileRenamer），并带版本号，
+/// 任务栏与窗口列表都能看到当前跑的哪个版本。
+fn window_title() -> String {
+    format!("FileRenamer v{}", APP_VERSION)
+}
+
 /// 变量说明弹窗文本。表头即变量：表格第一行列名可作 {变量}；以下为内置变量。
 fn vars_help_text() -> String {
-    [
+    let body = [
         "【内置变量】（表格第一行的列名也可直接当作 {变量} 使用）",
         "",
         "no       序号，按实际处理行从 1 编号；空行不占号，忽略表格 no 列的值",
         "old      旧文件名主名，不含后缀",
         "new      表格 new 列填写的新名称",
+        "author   表格 author 列填写的作者名（生成清单时 new 右侧的固定列）",
         "ext      文件后缀，小写、不带点，如 mp4",
         "create   文件创建日期，格式 YYYY-MM-DD",
         "update   文件最后修改日期，格式 YYYY-MM-DD",
@@ -119,11 +131,13 @@ fn vars_help_text() -> String {
         "【注意事项】",
         "1. old 和 new 两列的表头名固定，不能改名，否则无法定位文件。",
         "2. 内置变量优先于表格同名列：即使表格里有 create/size 列，也会被文件实际信息覆盖。",
-        "3. 表格右侧可加自定义列，表头写什么就能用 {什么}，例如列名“作者”→ {作者}。",
-        "4. 模板中写了不存在且非内置的变量（如 {date}），会替换为空并在完成时列出提醒。",
-        "5. {no} 按实际处理的行重新编号、跳过空行，因此可能与原表格行号不同。",
-        "6. 新名称不能含 \\ / : * ? \" < > | 等字符；后缀统一输出小写。",
-    ].join("\n")
+        "3. author 是固定列名（生成清单时 new 右侧自带），值由你在表里填写，清单无此列时按空值处理。",
+        "4. 表格右侧可加自定义列，表头写什么就能用 {什么}，例如列名“作者”→ {作者}。",
+        "5. 模板中写了不存在且非内置的变量（如 {date}），会替换为空并在完成时列出提醒。",
+        "6. {no} 按实际处理的行重新编号、跳过空行，因此可能与原表格行号不同。",
+        "7. 新名称不能含 \\ / : * ? \" < > | 等字符；后缀统一输出小写。",
+    ].join("\n");
+    format!("{}\n\n{}", window_title(), body)
 }
 
 /// 把顶层窗口移动到当前显示器工作区中央。
@@ -190,10 +204,13 @@ fn main() {
             H_FONT.store(font.0 as isize, Ordering::SeqCst);
         }
 
+        // 标题含版本号：任务栏与窗口列表都能看到当前跑的哪个版本。
+        // 运行时拼接（不能用 w!()，那是字面量宏），传 &HSTRING（windows-core 实现了 Param<PCWSTR>）。
+        let title = HSTRING::from(window_title());
         let hwnd = CreateWindowExW(
             Default::default(),
             class_name,
-            w!("批量重命名工具"),
+            &title,
             WS_OVERLAPPEDWINDOW,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
@@ -468,7 +485,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             match *boxed {
                 WorkResult::Generate(res, list_display) => match res {
                     Ok(n) => msg_box(
-                        &format!("已生成清单：{}\n共 {} 个文件。\n填好第二列后，可在功能二中随时处理。", list_display, n),
+                        &format!("已生成清单：{}\n共 {} 个文件。\n填好 new 列（可选填 author 列）后，可在功能二中随时处理。", list_display, n),
                         "完成", MB_OK | MB_ICONINFORMATION),
                     Err(e) => msg_box(&format!("生成清单失败：\n{}", e), "错误", MB_OK | MB_ICONERROR),
                 },
