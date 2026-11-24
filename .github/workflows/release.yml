@@ -16,8 +16,11 @@ jobs:
   build:
     runs-on: windows-latest
     steps:
+      # fetch-depth: 0 拉全量历史：生成发布内容需要定位上一标签
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup .NET SDK
         uses: actions/setup-dotnet@v4
@@ -48,7 +51,24 @@ jobs:
           Get-ChildItem artifacts
 
       # 创建 Release 并上传两个 exe（用官方 gh CLI，不引入第三方 action）
-      # --generate-notes：自动生成发布内容（基于本标签相对上一标签的提交记录）
+      # 发布内容 = 固定说明 + 上一标签到本标签之间的提交列表（gh 的 --generate-notes
+      # 只收录 PR，直接 push 的提交不会出现，因此自己组装）
+      - name: Build release notes
+        shell: pwsh
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          $lines = @("FileRenamer Windows 版：C#（单文件自包含）与 Rust（Win32）两套实现。", "", "### 本次更新")
+          $prev = git describe --tags --abbrev=0 "$env:VERSION^" 2>$null
+          if ($LASTEXITCODE -eq 0 -and $prev) {
+            $log = git log --pretty=format:"- %s" "$prev..$env:VERSION"
+            if ($log) { $lines += $log }
+          } else {
+            $lines += "- 首个版本"
+          }
+          ($lines -join "`n") | Out-File -Encoding utf8 release_notes.md
+          Get-Content release_notes.md
+
       - name: Create GitHub Release
         shell: pwsh
         env:
@@ -57,4 +77,4 @@ jobs:
         run: |
           gh release create "$env:VERSION" artifacts/*.exe `
             --title "$env:VERSION" `
-            --generate-notes
+            --notes-file release_notes.md
