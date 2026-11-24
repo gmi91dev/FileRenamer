@@ -66,11 +66,16 @@ public static class FileOps
 
         for (int i = 0; i < names.Count; i++)
         {
-            ws.Cell(i + 2, 1).Value = i + 1;
+            // no 列用公式生成序号：用户删掉任意一行后，Excel/WPS 重算公式，序号自动连续不断档。
+            // ROW() 返回当前行号，减去表头占用的 1 行即为从 1 开始的序号。
+            ws.Cell(i + 2, 1).FormulaA1 = "ROW()-1";
             // 序号列数据：水平居中
             ws.Cell(i + 2, 1).Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Center;
             ws.Cell(i + 2, 2).Value = names[i];
         }
+
+        // 所有内容（表头 + 数据行）垂直居中（ClosedXML IXLAlignment.Vertical）
+        ws.Range(1, 1, names.Count + 1, 3).Style.Alignment.Vertical = XLAlignmentVerticalValues.Center;
 
         // old/new 列开启自动换行：长文件名不会被相邻列遮挡（IXLAlignment.WrapText）
         ws.Column(2).Style.Alignment.WrapText = true;

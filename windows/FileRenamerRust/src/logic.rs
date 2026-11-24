@@ -85,18 +85,24 @@ pub fn generate_list(folder: &Path, filter: &TypeFilter) -> Result<Vec<String>, 
     worksheet.set_name("重命名清单")?; // 与 rename() 读取时的工作表名保持一致
     // 表头即变量名：no=序号，old=完整旧文件名（含后缀），new=新名称（用户填）。
     // old 列必须存完整文件名，否则程序无法定位原文件；{old} 变量渲染时自动剥离后缀。
-    // 标题行：加粗 + 水平居中；序号列数据：水平居中。
-    // 依据 rust_xlsxwriter 官方示例 Format::set_align(FormatAlign::Center)。
-    let bold_center = Format::new().set_bold().set_align(FormatAlign::Center);
-    let center = Format::new().set_align(FormatAlign::Center);
+    // 标题行：加粗 + 水平居中；序号列数据：水平居中；全部内容垂直居中。
+    // 依据 rust_xlsxwriter 官方示例 Format::set_align(FormatAlign::Center)，
+    // 垂直居中同为 set_align(FormatAlign::VerticalCenter)。
+    let bold_center = Format::new().set_bold()
+        .set_align(FormatAlign::Center).set_align(FormatAlign::VerticalCenter);
+    let center = Format::new()
+        .set_align(FormatAlign::Center).set_align(FormatAlign::VerticalCenter);
     // 依据 rust_xlsxwriter 文档 Format::set_text_wrap()：文本超列宽时自动换行，
     // 避免长文件名被右侧相邻列截断遮挡。列格式 + 单元格格式同时设置。
-    let wrap = Format::new().set_text_wrap();
+    let wrap = Format::new().set_text_wrap().set_align(FormatAlign::VerticalCenter);
     worksheet.write_with_format(0, 0, "no", &bold_center)?;
     worksheet.write_with_format(0, 1, "old", &bold_center)?;
     worksheet.write_with_format(0, 2, "new", &bold_center)?;
     for (i, name) in names.iter().enumerate() {
-        worksheet.write_number_with_format((i + 1) as u32, 0, (i + 1) as f64, &center)?;
+        // no 列用公式生成序号：用户删掉任意一行后，Excel/WPS 重算公式，序号自动连续不断档。
+        // ROW() 返回当前行号，减去表头占用的 1 行即为从 1 开始的序号。
+        // 依据 rust_xlsxwriter 文档 write_formula_with_format(row, col, formula, format)。
+        worksheet.write_formula_with_format((i + 1) as u32, 0, "=ROW()-1", &center)?;
         worksheet.write_with_format((i + 1) as u32, 1, name.as_str(), &wrap)?;
     }
     worksheet.set_column_width(0, 6)?;
