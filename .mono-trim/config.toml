@@ -1,0 +1,3 @@
+# 系统配置：由 mono-trim 生成，请勿手工修改（mtrim init / update 会整体重写本文件）
+version = "0.0.10"
+doc_target = "README.md"

@@ -1,0 +1,6 @@
+# 用户配置：只写需要覆盖或新增的内容
+
+[profiles.windev]
+mode = "black"
+desc = "Windows 端开发：隐藏 mac/linux 平台目录，其余全量保留"
+targets = ["mac/", "linux/"]
