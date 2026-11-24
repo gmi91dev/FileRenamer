@@ -48,6 +48,7 @@ jobs:
           Get-ChildItem artifacts
 
       # 创建 Release 并上传两个 exe（用官方 gh CLI，不引入第三方 action）
+      # --generate-notes：自动生成发布内容（基于本标签相对上一标签的提交记录）
       - name: Create GitHub Release
         shell: pwsh
         env:
@@ -56,4 +57,4 @@ jobs:
         run: |
           gh release create "$env:VERSION" artifacts/*.exe `
             --title "$env:VERSION" `
-            --notes "FileRenamer Windows 版：C#（单文件自包含）与 Rust（Win32）两套实现。"
+            --generate-notes
