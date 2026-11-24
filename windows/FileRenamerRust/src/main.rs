@@ -33,7 +33,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     HTCLIENT, HWND_TOP, IDC_WAIT, KillTimer, PostMessageW, PostQuitMessage, RegisterClassW,
     SendMessageW, SetCursor, SetTimer, SetWindowPos, SetWindowTextW, GetWindowRect,
     SystemParametersInfoW, TranslateMessage, WM_APP, WM_COMMAND, WM_CTLCOLORSTATIC, WM_SETCURSOR,
-    WM_TIMER, WM_SETFONT, WM_DESTROY,
+    WM_TIMER, WM_PAINT, WM_SETFONT, WM_DESTROY,
     WS_BORDER, WS_CHILD, WS_OVERLAPPEDWINDOW, WS_VISIBLE, WNDCLASSW, MB_ICONERROR, MB_ICONINFORMATION,
     MB_ICONWARNING, MB_OK, CW_USEDEFAULT, HMENU, IDC_ARROW, LoadCursorW, ShowWindow,
     SW_HIDE, SW_SHOW, SWP_SHOWWINDOW, WINDOW_STYLE, SPI_GETNONCLIENTMETRICS, NONCLIENTMETRICSW,
@@ -277,7 +277,10 @@ unsafe fn build_controls(parent: HWND) {
     make(w!("STATIC"), w!("表头即变量（详见右侧按钮）"), label, 26, 262, 220, 18, parent, 0);
     make(w!("BUTTON"), w!("查看变量说明"), button, 330, 256, 126, 28, parent, IDC_BTN_VARS);
 
-    // 菊花子窗口：默认隐藏，忙碌时居中显示在主窗口上层
+    // 菊花子窗口：默认隐藏，忙碌时居中显示在主窗口上层。
+    // 自定义窗口类按「类名 + hInstance」定位，hInstance 必须传注册时的模块句柄
+    // （系统类 BUTTON/EDIT 传 None 没问题，但自注册类传 None 会找不到类导致创建失败）。
+    let instance = GetModuleHandleW(None).expect("get module handle");
     let spin = CreateWindowExW(
         Default::default(),
         w!("FileRenamerSpinner"),
@@ -286,7 +289,8 @@ unsafe fn build_controls(parent: HWND) {
         sc(12), sc(12), sc(SPIN_SIZE), sc(SPIN_SIZE),
         Some(parent),
         None,
-        None, None,
+        Some(instance.into()),
+        None,
     ).expect("create spinner");
     H_SPIN.store(spin.0 as isize, Ordering::SeqCst);
 }
@@ -321,6 +325,8 @@ unsafe fn apply_font(hwnd: HWND) {
 /// 依据：微软文档 Arc(hdc, x1,y1,x2,y2, x3,y3,x4,y4) —— 边界矩形 + 弧起点/终点射线，
 /// 起止点取圆周上按当前角度计算的坐标。
 unsafe extern "system" fn spinner_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    // 注意：match arm 必须用【已导入的常量】（WM_TIMER/WM_PAINT），否则裸标识符是
+    // 变量绑定模式（匹配一切值、抢在 _ 之前），曾导致 WM_NCCREATE 返回 0 使窗口创建失败。
     match msg {
         WM_TIMER => {
             SPIN_ANGLE.fetch_add(SPIN_STEP_DEG, Ordering::SeqCst);

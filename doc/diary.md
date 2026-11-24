@@ -16,3 +16,4 @@
 - 修复 UI 无响应：两套实现（C# WinForms / Rust Win32）的生成清单与重命名改为后台线程执行，窗口保持响应；执行期间显示自绘旋转菊花并禁用 浏览×2/生成/重命名 四个操作按钮（C# 用 Task.Run + 自绘 Spinner 控件；Rust 用 std::thread + PostMessageW 回 UI 线程 + GDI Arc 菊花子窗口）。
 - 性能优化：名称格式模板未使用 {hash} 时跳过 MD5 全文件读取（此前每个文件都强制计算，大文件场景代价高）。
 - 发布流程增强：Release 创建改用 `gh release create --generate-notes`，每次发布自动生成基于提交记录的发布内容。发布 v0.1.1。
+- 修复 v0.1.1 Rust 版启动即静默退出（退出码 0xC0000409）：`spinner_proc` 的 match 里 `WM_PAINT =>` 分支因常量未导入，被 Rust 解析为变量绑定模式（catch-all），吞掉全部消息并使 `WM_NCCREATE` 返回 FALSE，系统随即销毁窗口导致 `CreateWindowExW` 返回 NULL、`expect` panic。补导入 `WM_PAINT` 即修复。教训：match arm 裸标识符必须确认常量已导入（编译器只报 unused-variable warning），warning 不可忽略。
